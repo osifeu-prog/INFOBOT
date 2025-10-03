@@ -1,20 +1,57 @@
 import os
+import uuid
 import json
+import logging
 from datetime import datetime
-from telegram import Update, ReplyKeyboardRemove
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ConversationHandler,
     filters,
     ContextTypes
 )
 
-# States
-UPLOAD_IMAGE, SET_SHOP, SET_TITLE, SET_DESC, SET_PRICE, PURCHASE_WAIT = range(6)
+# ─────────────────────────────────────────────────────────────
+# הגדרות וסידור לוגים
+# ─────────────────────────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────
+# קבלת ADMIN_ID מה־env
+# ─────────────────────────────────────────────────────────────
+ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
+
+# ─────────────────────────────────────────────────────────────
+# Conversation states
+# ─────────────────────────────────────────────────────────────
+(
+    UPLOAD_IMG,
+    SET_SHOP,
+    SET_TITLE,
+    SET_DESC,
+    SET_PRICE,
+    PURCHASE_WAIT
+) = range(6)
+
+# In-memory storage זמני לרישומי Upload
 _upload_sessions: dict[int, dict] = {}
 
+# ─────────────────────────────────────────────────────────────
+# Helpers ליצירת ספריות
+# ─────────────────────────────────────────────────────────────
 def ensure_dirs(path: str):
     os.makedirs(path, exist_ok=True)
 
@@ -27,110 +64,122 @@ def card_dir(shop: str) -> str:
 def purchases_dir(shop: str, card_id: str) -> str:
     return os.path.join(shop_dir(shop), "purchases", card_id)
 
-# Upload flow
-async def upload_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📤 שלח תמונת קלף (JPEG/PNG).")
-    return UPLOAD_IMAGE
+# ─────────────────────────────────────────────────────────────
+# תפריט ראשי דינמי (Admin vs Customer)
+# ─────────────────────────────────────────────────────────────
+def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
+    if is_admin:
+        buttons = [
+            [InlineKeyboardButton("🚀 Launch All Shops", callback_data="admin_launch")],
+            [InlineKeyboardButton("📊 View Sales",     callback_data="admin_sales")],
+            [InlineKeyboardButton("💳 Customer View",  callback_data="switch_customer")]
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton("🛍 Browse Shop",   callback_data="cust_browse")],
+            [InlineKeyboardButton("🔑 My Tokens",     callback_data="cust_tokens")],
+            [InlineKeyboardButton("⚙️ Admin View",    callback_data="switch_admin")]
+        ]
+    return InlineKeyboardMarkup(buttons)
 
-async def upload_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ─────────────────────────────────────────────────────────────
+# /menu → הצגת התפריט הראשי
+# ─────────────────────────────────────────────────────────────
+async def show_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    _upload_sessions[uid] = {"file_id": update.message.photo[-1].file_id}
-    await update.message.reply_text("🏬 בחר שם לחנות:")
-    return SET_SHOP
-
-async def set_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    _upload_sessions[uid]["shop"] = update.message.text.strip()
-    ensure_dirs(card_dir(_upload_sessions[uid]["shop"]))
-    await update.message.reply_text("🔖 כותרת הקלף:")
-    return SET_TITLE
-
-async def set_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    _upload_sessions[uid]["title"] = update.message.text.strip()
-    await update.message.reply_text("✏️ תיאור הקלף:")
-    return SET_DESC
-
-async def set_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    _upload_sessions[uid]["desc"] = update.message.text.strip()
-    await update.message.reply_text("💰 מחיר בשקלים:")
-    return SET_PRICE
-
-async def set_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    data = _upload_sessions.pop(uid)
-    try:
-        data["price"] = float(update.message.text.strip())
-    except ValueError:
-        return await update.message.reply_text("❗ מחיר לא חוקי.")
-    card_id = datetime.now().strftime("%Y%m%d%H%M%S")
-
-    # שמירת תמונה
-    ensure_dirs(card_dir(data["shop"]))
-    img_path = os.path.join(card_dir(data["shop"]), f"{card_id}.jpg")
-    file = await ctx.bot.get_file(data["file_id"])
-    await file.download_to_drive(img_path)
-
-    # שמירת מטה
-    meta = {
-        "title":       data["title"],
-        "description": data["desc"],
-        "price":       data["price"],
-        "owner_id":    uid,
-        "created_at":  datetime.now().isoformat()
-    }
-    with open(os.path.join(card_dir(data["shop"]), f"{card_id}.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    await update.message.reply_text(f"✅ קלף נוצר!\n/purchase {data['shop']} {card_id}")
-    return ConversationHandler.END
-
-# Purchase flow
-async def purchase_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    args = ctx.args
-    if len(args) != 2:
-        return await update.message.reply_text("❗ /purchase <shop> <card_id>")
-    shop, card_id = args
-    meta_path = os.path.join(card_dir(shop), f"{card_id}.json")
-    if not os.path.isfile(meta_path):
-        return await update.message.reply_text("❌ לא נמצא קלף.")
-    meta = json.load(open(meta_path, "r", encoding="utf-8"))
-
-    await update.message.reply_photo(
-        photo=open(os.path.join(card_dir(shop), f"{card_id}.jpg"), "rb"),
-        caption=(
-            f"🎴 {meta['title']}\n"
-            f"{meta['description']}\n"
-            f"💰 {meta['price']}₪\n"
-            "שלח צילום מסך של התשלום."
-        )
+    is_admin = (uid == ADMIN_ID)
+    await update.message.reply_text(
+        "בחר אופציה בתפריט:",
+        reply_markup=main_menu(is_admin)
     )
-    ctx.user_data["shop"] = shop
-    ctx.user_data["card_id"] = card_id
-    return PURCHASE_WAIT
 
-async def purchase_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    shop = ctx.user_data["shop"]
-    card_id = ctx.user_data["card_id"]
-    purchase_id = f"{card_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    ensure_dirs(purchases_dir(shop, card_id))
-    img_path = os.path.join(purchases_dir(shop, card_id), f"{purchase_id}.jpg")
-    file = await ctx.bot.get_file(update.message.photo[-1].file_id)
-    await file.download_to_drive(img_path)
-    await update.message.reply_text(f"✅ תודה! ID רכישה: {purchase_id}")
-    return ConversationHandler.END
+# ─────────────────────────────────────────────────────────────
+# Callback לניווט בתפריטים ולביצוע פעולות
+# ─────────────────────────────────────────────────────────────
+async def callback_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    is_admin = (uid == ADMIN_ID)
+    key = query.data
 
+    # מעבר בין מצבי תצוגה
+    if key == "switch_admin" and not is_admin:
+        return await query.edit_message_text("🛠 Admin View:", reply_markup=main_menu(True))
+    if key == "switch_customer" and is_admin:
+        return await query.edit_message_text("🙂 Customer View:", reply_markup=main_menu(False))
+
+    # Admin: השקה מחדש של כל ה־Shop Bots
+    if key == "admin_launch" and is_admin:
+        # פה אפשר להתקשר ל־bot_manager.main() במידת הצורך
+        return await query.edit_message_text("✅ All Shop Bots launched.")
+
+    # Admin: סיכום מכירות לכל חנות
+    if key == "admin_sales" and is_admin:
+        lines = []
+        root = "shops"
+        if os.path.isdir(root):
+            for shop in os.listdir(root):
+                sales_root = os.path.join(root, shop, "purchases")
+                count = 0
+                if os.path.isdir(sales_root):
+                    for card in os.listdir(sales_root):
+                        folder = os.path.join(sales_root, card)
+                        count += len(os.listdir(folder))
+                lines.append(f"{shop}: {count} sales")
+        text = "\n".join(lines) or "אין מכירות עדיין."
+        return await query.edit_message_text(text)
+
+    # Customer: גלישה בחנויות
+    if key == "cust_browse":
+        buttons = []
+        for shop in os.listdir("shops"):
+            buttons.append([InlineKeyboardButton(shop, callback_data=f"shop_{shop}")])
+        kb = InlineKeyboardMarkup(buttons)
+        return await query.edit_message_text("בחר חנות:", reply_markup=kb)
+
+    # Customer: הצגת קלפים בחנות
+    if key.startswith("shop_"):
+        shop = key.split("_",1)[1]
+        cards = os.listdir(card_dir(shop))
+        buttons = [[InlineKeyboardButton(c.split(".")[0], callback_data=f"buy_{shop}_{c.split('.')[0]}")] for c in cards]
+        kb = InlineKeyboardMarkup(buttons)
+        return await query.edit_message_text(f"📋 קלפים ב־{shop}:", reply_markup=kb)
+
+    # Customer: רכישת קלף ויצירת NFT Token
+    if key.startswith("buy_"):
+        _, shop, card_id = key.split("_",2)
+        token = str(uuid.uuid4())
+        folder = purchases_dir(shop, card_id)
+        ensure_dirs(folder)
+        token_path = os.path.join(folder, f"{uid}.token")
+        with open(token_path, "w") as f:
+            f.write(token)
+        text = f"✅ רכישה בוצעה!\nYour NFT-Token: `{token}`"
+        return await query.edit_message_text(text, parse_mode="Markdown")
+
+    # Customer: הצגת ה־Tokens שברשותו
+    if key == "cust_tokens":
+        lines = []
+        root = "shops"
+        for shop in os.listdir(root):
+            sales_root = os.path.join(root, shop, "purchases")
+            if not os.path.isdir(sales_root):
+                continue
+            for card in os.listdir(sales_root):
+                tf = os.path.join(sales_root, card, f"{uid}.token")
+                if os.path.isfile(tf):
+                    token = open(tf).read().strip()
+                    lines.append(f"{shop}/{card}: `{token}`")
+        text = "\n".join(lines) or "אין לך NFT-Tokens."
+        return await query.edit_message_text(text, parse_mode="Markdown")
+
+# ─────────────────────────────────────────────────────────────
+# Registration של Handlers
+# ─────────────────────────────────────────────────────────────
 def register_handlers(app):
-    upload_conv = ConversationHandler(
-        entry_points=[CommandHandler("upload_card", upload_start)],
-        states={
-            UPLOAD_IMAGE: [MessageHandler(filters.PHOTO, upload_image)],
-            SET_SHOP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, set_shop)],
-            SET_TITLE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, set_title)],
-            SET_DESC:     [MessageHandler(filters.TEXT & ~filters.COMMAND, set_desc)],
-            SET_PRICE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, set_price)],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "מבוטל."))],
-    )
-    purchase_conv = Conversation
+    # תפריט דינמי
+    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CallbackQueryHandler(callback_menu))
+
+    # (ניתן להוסיף כאן גם handlers של upload_card, purchase if דרוש)
