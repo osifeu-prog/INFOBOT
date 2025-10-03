@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# אופציונלי: דיבג – בדקו שהתוכן הגיע באמת לתוך /app
+# לבדיקת העתקת כל הקבצים
 RUN ls -al /app
 
-# ENTRYPOINT ו-CMD מדויקים
-ENTRYPOINT ["python3", "main.py"]
+# ENTRYPOINT להרצת כל שני הסקריפטים יחד
+ENTRYPOINT ["sh", "-c", "python main.py & python bot_manager.py"]
