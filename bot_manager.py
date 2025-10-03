@@ -11,6 +11,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot_manager")
 
+ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
+
 async def launch_bot(token: str):
     logger.info(f"Launching Shop Bot for token: {token[:8]}…")
     app = ApplicationBuilder().token(token).build()
@@ -18,13 +20,24 @@ async def launch_bot(token: str):
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
+    # דווח על ה-username של ה-Shop Bot לצ'אט של ה-Admin
+    me = await app.bot.get_me()
+    await app.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=(
+            f"✅ Shop Bot launched as @{me.username}\n"
+            "שלחו לו בפרטי /menu כדי להתחיל."
+        )
+    )
     return app
 
 async def main():
+    # ודא שקיימת תיקיית registrations/
     if not os.path.isdir("registrations"):
         os.makedirs("registrations", exist_ok=True)
 
     tasks = []
+    # מציאת כל הטוקנים ב-registrations/USER_ID/TOKEN
     for user_id in os.listdir("registrations"):
         path = os.path.join("registrations", user_id)
         if not os.path.isdir(path):
@@ -37,6 +50,7 @@ async def main():
     else:
         logger.info("No registered shop bots found.")
 
+    # השאר את התוכנית רצה ללא הפסקה
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
