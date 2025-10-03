@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -19,6 +20,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
+import bot_manager  # מייבא את מנהל ה-Shop Bots
+
 # ─────────────────────────────────────────────────────────────
 # Logging to stdout for server debugging
 # ─────────────────────────────────────────────────────────────
@@ -30,9 +33,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-# Load ENV
+# Load ENV (לוקל) ובדיקת SERVICE vars ב-Docker
 # ─────────────────────────────────────────────────────────────
-load_dotenv()
+load_dotenv()  # השאירו לשימוש מקומי בלבד; ב-Docker נעשו הגדרות ב-Service Variables
 TOKEN    = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 REG_ROOT = "registrations"
@@ -44,13 +47,7 @@ if not TOKEN or not ADMIN_ID:
 # ─────────────────────────────────────────────────────────────
 # Conversation states
 # ─────────────────────────────────────────────────────────────
-(
-    CONTACT,
-    BOT_TOKEN,
-    IMG1, TITLE1, PRICE1,
-    IMG2, TITLE2, PRICE2,
-    IMG3, TITLE3, PRICE3
-) = range(11)
+CONTACT, BOT_TOKEN, IMG1, TITLE1, PRICE1, IMG2, TITLE2, PRICE2, IMG3, TITLE3, PRICE3 = range(11)
 
 # ─────────────────────────────────────────────────────────────
 # In-memory sessions
@@ -75,6 +72,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "ברוכים הבאים! כדי להרשם – שתפו את פרטי הקשר שלכם:",
         reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True, resize_keyboard=True),
     )
+    # השקה של כל ה-Shop Bots הקיימים ברקע
+    asyncio.create_task(bot_manager.main())
     return CONTACT
 
 # ─────────────────────────────────────────────────────────────
@@ -102,13 +101,13 @@ async def bot_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return IMG1
 
 # ─────────────────────────────────────────────────────────────
-# image/title/price handlers לפיצ’ר 3 תמונות
+# עיבוד 3 תמונות: תמונה→כותרת→מחיר
 # ─────────────────────────────────────────────────────────────
 def make_img_handler(idx, next_state):
     async def handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
-        photo = update.message.photo[-1]
-        sessions[uid]["file_ids"].append(photo.file_id)
+        file_id = update.message.photo[-1].file_id
+        sessions[uid]["file_ids"].append(file_id)
         await update.message.reply_text(f"הכנס כותרת לתמונה #{idx}:")
         return next_state
     return handler
@@ -129,21 +128,24 @@ def make_price_handler(idx):
         except ValueError:
             return await update.message.reply_text("❗ מחיר לא חוקי, נסה שוב:")
         sessions[uid]["prices"].append(price)
-        # אם idx < 3 עוברים לתמונה הבאה, אחרת מסיימים
+
+        # אם idx < 3 עוברים תמונה הבאה, אחרת מסיימים
         if idx < 3:
             await update.message.reply_text(f"העלה תמונה #{idx+1}:")
             return [IMG2, IMG3][idx-1]
-        # סיום הרישום
+
+        # סיום רישום וכתיבה לדיסק
         data = sessions.pop(uid)
         bot_token = data["bot_token"]
         folder = user_dir(uid, bot_token)
         ensure_dirs(os.path.join(folder, "images"))
-        # הורדת תמונות לשרת
+
+        # הורדת תמונות
         for i, file_id in enumerate(data["file_ids"], start=1):
-            path = os.path.join(folder, "images", f"{i}.jpg")
             file = await ctx.bot.get_file(file_id)
-            await file.download_to_drive(path)
-        # שמירת מטה
+            await file.download_to_drive(os.path.join(folder, "images", f"{i}.jpg"))
+
+        # שמירת metadata
         meta = {
             "contact":   data["contact"],
             "titles":    data["titles"],
@@ -152,7 +154,8 @@ def make_price_handler(idx):
         }
         with open(os.path.join(folder, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
-        # הודעה למנהל
+
+        # Notify למנהל
         await ctx.bot.send_message(
             chat_id=ADMIN_ID,
             text=(
@@ -163,14 +166,12 @@ def make_price_handler(idx):
             ),
             parse_mode="Markdown"
         )
-        await update.message.reply_text(
-            "🎉 הרשמת בהצלחה! הבוט שלך ייווצר ויתחיל לפעול."
-        )
+        await update.message.reply_text("🎉 הרשמת בהצלחה! הבוט שלך ייווצר ויתחיל לפעול.")
         return ConversationHandler.END
     return handler
 
 # ─────────────────────────────────────────────────────────────
-# איתחולים והרצת הבוט
+# Registration ConversationHandler
 # ─────────────────────────────────────────────────────────────
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -190,7 +191,7 @@ def main():
             TITLE3:    [MessageHandler(filters.TEXT & ~filters.COMMAND, make_title_handler(3, PRICE3))],
             PRICE3:    [MessageHandler(filters.TEXT & ~filters.COMMAND, make_price_handler(3))],
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: c.bot.send_message(chat_id=u.effective_chat.id, text="מבוטל."))],
+        fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "מבוטל."))],
     )
 
     app.add_handler(conv)
