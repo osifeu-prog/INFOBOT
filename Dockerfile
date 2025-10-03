@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # עכשיו מריצים רק את main.py
-CMD ["python", "main.py"]
+ENTRYPOINT ["python", "main.py"]
