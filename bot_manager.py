@@ -21,25 +21,22 @@ async def launch_bot(token: str):
     return app
 
 async def main():
-    # בודק אם יש Registry כבר קיימים
     if not os.path.isdir("registrations"):
         os.makedirs("registrations", exist_ok=True)
 
     tasks = []
-    # עבור כל משתמש/טוקן ב–registrations/USER_ID/TOKEN
     for user_id in os.listdir("registrations"):
-        user_path = os.path.join("registrations", user_id)
-        if not os.path.isdir(user_path):
+        path = os.path.join("registrations", user_id)
+        if not os.path.isdir(path):
             continue
-        for bot_token in os.listdir(user_path):
+        for bot_token in os.listdir(path):
             tasks.append(launch_bot(bot_token))
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        logger.info("No registered shop bots found. Waiting for registrations…")
+        logger.info("No registered shop bots found.")
 
-    # השארת התוכנית רצה לעד
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
