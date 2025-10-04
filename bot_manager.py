@@ -2,16 +2,16 @@ import os
 import asyncio
 import logging
 from telegram.ext import ApplicationBuilder
-from shop_bot import register_handlers
+from shop_bot import register_handlers  # וודאו שקיים shop_bot.py עם register_handlers
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("bot_manager")
 
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
+REG_ROOT = "registrations"
 
 async def launch_bot(token: str):
     logger.info(f"Launching Shop Bot for token: {token[:8]}…")
@@ -20,20 +20,17 @@ async def launch_bot(token: str):
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
-
-    # במקום לשלוח הודעה – נדפיס ל־logs את ה־username של ה־Shop Bot
     me = await app.bot.get_me()
     logger.info(f"✅ Shop Bot launched as @{me.username}")
-
     return app
 
 async def main():
-    if not os.path.isdir("registrations"):
-        os.makedirs("registrations", exist_ok=True)
+    if not os.path.isdir(REG_ROOT):
+        os.makedirs(REG_ROOT, exist_ok=True)
 
     tasks = []
-    for user_id in os.listdir("registrations"):
-        user_path = os.path.join("registrations", user_id)
+    for user_id in os.listdir(REG_ROOT):
+        user_path = os.path.join(REG_ROOT, user_id)
         if not os.path.isdir(user_path):
             continue
         for bot_token in os.listdir(user_path):
@@ -44,8 +41,5 @@ async def main():
     else:
         logger.info("No registered shop bots found.")
 
-    # משאירים את התוכנית רצה לעד
+    # משאירים את הלולאה פתוחה
     await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
